@@ -1,14 +1,13 @@
 import os
 from flask import Flask, request, jsonify
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    Filters,
-    Updater,
-    Dispatcher,
-    CallbackContext
+    ContextTypes,
+    filters
 )
 import logging
 from threading import Thread
@@ -36,7 +35,7 @@ def health_check():
     return jsonify({"status": "healthy"}), 200
 
 # Telegram Bot Commands
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
     📝 *Task Manager Bot* 📝
     
@@ -50,9 +49,9 @@ def start(update: Update, context: CallbackContext):
     
     Manage your tasks easily with priorities!
     """
-    update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
-def help_command(update: Update, context: CallbackContext):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
     📝 *Available Commands* 📝
     
@@ -64,13 +63,13 @@ def help_command(update: Update, context: CallbackContext):
     
     Tasks can have High, Medium, or Low priority.
     """
-    update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
-def add_task(update: Update, context: CallbackContext):
+async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['awaiting_task'] = True
-    update.message.reply_text("Please enter the task description:")
+    await update.message.reply_text("Please enter the task description:")
 
-def receive_task_description(update: Update, context: CallbackContext):
+async def receive_task_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if 'awaiting_task' in context.user_data:
         context.user_data['task_description'] = update.message.text
@@ -84,14 +83,14 @@ def receive_task_description(update: Update, context: CallbackContext):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        update.message.reply_text(
+        await update.message.reply_text(
             "Please select the task priority:",
             reply_markup=reply_markup
         )
 
-def button_callback(update: Update, context: CallbackContext):
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
+    await query.answer()
     
     user_id = str(query.from_user.id)
     data = query.data
@@ -103,20 +102,20 @@ def button_callback(update: Update, context: CallbackContext):
             if task_db.add_task(user_id, description, priority):
                 del context.user_data['task_description']
                 del context.user_data['awaiting_priority']
-                query.edit_message_text(f"✅ Task added with {priority} priority!")
+                await query.edit_message_text(f"✅ Task added with {priority} priority!")
             else:
-                query.edit_message_text("⚠️ Failed to add task. Please try again.")
+                await query.edit_message_text("⚠️ Failed to add task. Please try again.")
     
     elif data.startswith('delete_'):
         task_id = int(data.split('_')[1])
         task = task_db.get_task(task_id)
         if task and task['user_id'] == user_id:
             if task_db.delete_task(task_id):
-                query.edit_message_text(f"🗑 Task deleted: {task['description']}")
+                await query.edit_message_text(f"🗑 Task deleted: {task['description']}")
             else:
-                query.edit_message_text("⚠️ Failed to delete task. Please try again.")
+                await query.edit_message_text("⚠️ Failed to delete task. Please try again.")
         else:
-            query.edit_message_text("⚠️ Invalid task selection!")
+            await query.edit_message_text("⚠️ Invalid task selection!")
     
     elif data.startswith('edit_'):
         parts = data.split('_')
@@ -125,7 +124,7 @@ def button_callback(update: Update, context: CallbackContext):
         task = task_db.get_task(task_id)
         
         if not task or task['user_id'] != user_id:
-            query.edit_message_text("⚠️ Invalid task selection!")
+            await query.edit_message_text("⚠️ Invalid task selection!")
             return
         
         if action == 'select':
@@ -137,7 +136,7 @@ def button_callback(update: Update, context: CallbackContext):
                 [InlineKeyboardButton("Cancel", callback_data=f'edit_{task_id}_cancel')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            query.edit_message_text(
+            await query.edit_message_text(
                 f"What would you like to edit for task:\n{task['description']}?",
                 reply_markup=reply_markup
             )
@@ -145,7 +144,7 @@ def button_callback(update: Update, context: CallbackContext):
         elif action == 'description':
             context.user_data['editing_task'] = task_id
             context.user_data['editing_field'] = 'description'
-            query.edit_message_text("Please send the new task description:")
+            await query.edit_message_text("Please send the new task description:")
         
         elif action == 'priority':
             keyboard = [
@@ -154,7 +153,7 @@ def button_callback(update: Update, context: CallbackContext):
                 [InlineKeyboardButton("Low", callback_data=f'edit_{task_id}_setpriority_Low')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            query.edit_message_text(
+            await query.edit_message_text(
                 "Select the new priority:",
                 reply_markup=reply_markup
             )
@@ -162,9 +161,9 @@ def button_callback(update: Update, context: CallbackContext):
         elif action.startswith('setpriority'):
             new_priority = action.split('_')[1]
             if task_db.update_task_priority(task_id, new_priority):
-                query.edit_message_text(f"✅ Priority updated to {new_priority}!")
+                await query.edit_message_text(f"✅ Priority updated to {new_priority}!")
             else:
-                query.edit_message_text("⚠️ Failed to update priority. Please try again.")
+                await query.edit_message_text("⚠️ Failed to update priority. Please try again.")
             
             if 'editing_task' in context.user_data:
                 del context.user_data['editing_task']
@@ -172,13 +171,13 @@ def button_callback(update: Update, context: CallbackContext):
                 del context.user_data['editing_field']
         
         elif action == 'cancel':
-            query.edit_message_text("Edit operation cancelled.")
+            await query.edit_message_text("Edit operation cancelled.")
             if 'editing_task' in context.user_data:
                 del context.user_data['editing_task']
             if 'editing_field' in context.user_data:
                 del context.user_data['editing_field']
 
-def receive_edit_description(update: Update, context: CallbackContext):
+async def receive_edit_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if 'editing_task' in context.user_data and 'editing_field' in context.user_data:
         task_id = context.user_data['editing_task']
@@ -187,19 +186,19 @@ def receive_edit_description(update: Update, context: CallbackContext):
         if task and task['user_id'] == user_id and context.user_data['editing_field'] == 'description':
             new_description = update.message.text
             if task_db.update_task_description(task_id, new_description):
-                update.message.reply_text("✅ Task description updated!")
+                await update.message.reply_text("✅ Task description updated!")
             else:
-                update.message.reply_text("⚠️ Failed to update description. Please try again.")
+                await update.message.reply_text("⚠️ Failed to update description. Please try again.")
             
             del context.user_data['editing_task']
             del context.user_data['editing_field']
 
-def list_tasks(update: Update, context: CallbackContext):
+async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     tasks = task_db.get_tasks(user_id)
     
     if not tasks:
-        update.message.reply_text("You don't have any tasks yet!")
+        await update.message.reply_text("You don't have any tasks yet!")
         return
     
     message = "📋 *Your Tasks* 📋\n\n"
@@ -214,14 +213,14 @@ def list_tasks(update: Update, context: CallbackContext):
         
         message += f"{task['id']}. {priority_icon} {task['description']} ({task['priority']} priority)\n"
     
-    update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message, parse_mode='Markdown')
 
-def edit_task(update: Update, context: CallbackContext):
+async def edit_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     tasks = task_db.get_tasks(user_id)
     
     if not tasks:
-        update.message.reply_text("You don't have any tasks to edit!")
+        await update.message.reply_text("You don't have any tasks to edit!")
         return
     
     keyboard = []
@@ -234,17 +233,17 @@ def edit_task(update: Update, context: CallbackContext):
         ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text(
+    await update.message.reply_text(
         "Select a task to edit:",
         reply_markup=reply_markup
     )
 
-def delete_task(update: Update, context: CallbackContext):
+async def delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     tasks = task_db.get_tasks(user_id)
     
     if not tasks:
-        update.message.reply_text("You don't have any tasks to delete!")
+        await update.message.reply_text("You don't have any tasks to delete!")
         return
     
     keyboard = []
@@ -257,15 +256,15 @@ def delete_task(update: Update, context: CallbackContext):
         ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text(
+    await update.message.reply_text(
         "Select a task to delete:",
         reply_markup=reply_markup
     )
 
-def error_handler(update: Update, context: CallbackContext):
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     if update and update.message:
-        update.message.reply_text('An error occurred. Please try again.')
+        await update.message.reply_text('An error occurred. Please try again.')
 
 def setup_bot():
     # Get Telegram bot token from environment variable
@@ -273,26 +272,24 @@ def setup_bot():
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
     
-    # Create bot and dispatcher
-    bot = Bot(token=token)
-    updater = Updater(bot=bot, use_context=True)
-    dispatcher = updater.dispatcher
+    # Create Application
+    application = Application.builder().token(token).build()
     
     # Add handlers
-    dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(CommandHandler('help', help_command))
-    dispatcher.add_handler(CommandHandler('add', add_task))
-    dispatcher.add_handler(CommandHandler('list', list_tasks))
-    dispatcher.add_handler(CommandHandler('edit', edit_task))
-    dispatcher.add_handler(CommandHandler('delete', delete_task))
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('add', add_task))
+    application.add_handler(CommandHandler('list', list_tasks))
+    application.add_handler(CommandHandler('edit', edit_task))
+    application.add_handler(CommandHandler('delete', delete_task))
     
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_task_description))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_edit_description))
-    dispatcher.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_task_description))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_description))
+    application.add_handler(CallbackQueryHandler(button_callback))
     
-    dispatcher.add_error_handler(error_handler)
+    application.add_error_handler(error_handler)
     
-    return updater
+    return application
 
 def run_flask():
     port = int(os.getenv('PORT', 8000))
@@ -304,6 +301,5 @@ if __name__ == '__main__':
     flask_thread.start()
     
     # Start Telegram bot
-    updater = setup_bot()
-    updater.start_polling()
-    updater.idle()
+    application = setup_bot()
+    application.run_polling()
