@@ -217,4 +217,93 @@ def list_tasks(update: Update, context: CallbackContext):
     update.message.reply_text(message, parse_mode='Markdown')
 
 def edit_task(update: Update, context: CallbackContext):
-    user
+    user_id = str(update.effective_user.id)
+    tasks = task_db.get_tasks(user_id)
+    
+    if not tasks:
+        update.message.reply_text("You don't have any tasks to edit!")
+        return
+    
+    keyboard = []
+    for task in tasks:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{task['id']}. {task['description'][:20]}... ({task['priority']})",
+                callback_data=f'edit_{task["id"]}_select'
+            )
+        ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text(
+        "Select a task to edit:",
+        reply_markup=reply_markup
+    )
+
+def delete_task(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    tasks = task_db.get_tasks(user_id)
+    
+    if not tasks:
+        update.message.reply_text("You don't have any tasks to delete!")
+        return
+    
+    keyboard = []
+    for task in tasks:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{task['id']}. {task['description'][:20]}...",
+                callback_data=f'delete_{task["id"]}'
+            )
+        ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text(
+        "Select a task to delete:",
+        reply_markup=reply_markup
+    )
+
+def error_handler(update: Update, context: CallbackContext):
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    if update and update.message:
+        update.message.reply_text('An error occurred. Please try again.')
+
+def setup_bot():
+    # Get Telegram bot token from environment variable
+    token = os.getenv('TELEGRAM_BOT_TOKEN')
+    if not token:
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
+    
+    # Create bot and dispatcher
+    bot = Bot(token=token)
+    updater = Updater(bot=bot, use_context=True)
+    dispatcher = updater.dispatcher
+    
+    # Add handlers
+    dispatcher.add_handler(CommandHandler('start', start))
+    dispatcher.add_handler(CommandHandler('help', help_command))
+    dispatcher.add_handler(CommandHandler('add', add_task))
+    dispatcher.add_handler(CommandHandler('list', list_tasks))
+    dispatcher.add_handler(CommandHandler('edit', edit_task))
+    dispatcher.add_handler(CommandHandler('delete', delete_task))
+    
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_task_description))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_edit_description))
+    dispatcher.add_handler(CallbackQueryHandler(button_callback))
+    
+    dispatcher.add_error_handler(error_handler)
+    
+    return updater
+
+def run_flask():
+    port = int(os.getenv('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
+
+if __name__ == '__main__':
+    # Start Flask server in a separate thread
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+    
+    # Start Telegram bot
+    updater = setup_bot()
+    updater.start_polling()
+    updater.idle()
