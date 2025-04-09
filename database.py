@@ -50,10 +50,8 @@ class TaskDB:
         """Get all tasks for a user"""
         try:
             with self._get_connection() as conn:
-                cursor = conn.execute(
-                    'SELECT id, description, priority FROM tasks WHERE user_id = ? ORDER BY priority DESC, created_at',
-                    (user_id,)
-                )
+                """cursor = conn.execute('SELECT id, description, priority FROM tasks WHERE user_id = ? ORDER BY priority DESC, created_at',user_id,))"""
+                cursor = conn.execute('SELECT id, description, priority FROM tasks ORDER BY priority DESC, created_at')                
                 tasks = []
                 for row in cursor.fetchall():
                     tasks.append({
