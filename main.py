@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -26,6 +26,9 @@ app = Flask(__name__)
 # Initialize database
 task_db = TaskDB()
 
+# Track active users for notifications
+active_users = set()
+
 # Constants
 PRIORITIES = ['High', 'Medium', 'Low']
 
@@ -34,20 +37,37 @@ PRIORITIES = ['High', 'Medium', 'Low']
 def health_check():
     return jsonify({"status": "healthy"}), 200
 
+async def notify_all_users(context: ContextTypes.DEFAULT_TYPE, message: str, exclude_user_id: str = None):
+    """Notify all active users except the excluded one"""
+    for user_id in active_users:
+        if user_id != exclude_user_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify user {user_id}: {e}")
+
 # Telegram Bot Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    active_users.add(user_id)
+    
     help_text = """
-    📝 *Task Manager Bot* 📝
+    📝 *Shared Task Manager Bot* 📝
+    
+    *All users see and manage the same task list*
     
     *Commands:*
     /start - Show this message
-    /add - Add a new task
-    /list - Show all your tasks
+    /add - Add a new task (notifies everyone)
+    /list - Show all tasks
     /edit - Edit a task
     /delete - Delete a task
     /help - Show help
     
-    Manage your tasks easily with priorities!
+    Tasks can have High, Medium, or Low priority.
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -55,31 +75,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
     📝 *Available Commands* 📝
     
-    */add* - Add a new task with priority
-    */list* - Show all your tasks
+    */add* - Add a new shared task (notifies all users)
+    */list* - Show all tasks
     */edit* - Edit an existing task
     */delete* - Remove a task
     */help* - Show this help message
     
-    Tasks can have High, Medium, or Low priority.
+    All changes are visible to everyone immediately!
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['awaiting_task'] = True
-    await update.message.reply_text("Please enter the task description:")
+    await update.message.reply_text("Please enter the task description (visible to all users):")
 
 async def receive_task_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
     if 'awaiting_task' in context.user_data:
         context.user_data['task_description'] = update.message.text
         context.user_data['awaiting_task'] = False
         context.user_data['awaiting_priority'] = True
         
         keyboard = [
-            [InlineKeyboardButton("High", callback_data='priority_High')],
-            [InlineKeyboardButton("Medium", callback_data='priority_Medium')],
-            [InlineKeyboardButton("Low", callback_data='priority_Low')]
+            [InlineKeyboardButton("High 🔴", callback_data='priority_High')],
+            [InlineKeyboardButton("Medium 🟡", callback_data='priority_Medium')],
+            [InlineKeyboardButton("Low 🟢", callback_data='priority_Low')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -99,23 +118,52 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         priority = data.split('_')[1]
         if 'task_description' in context.user_data:
             description = context.user_data['task_description']
-            if task_db.add_task(user_id, description, priority):
-                del context.user_data['task_description']
-                del context.user_data['awaiting_priority']
-                await query.edit_message_text(f"✅ Task added with {priority} priority!")
+            creator_name = update.effective_user.full_name
+            
+            if task_db.add_task(description, priority, creator_name):
+                # Notify all users about the new task
+                notification = (
+                    f"📢 New shared task added by {creator_name}:\n\n"
+                    f"*{description}*\n"
+                    f"Priority: {priority}"
+                )
+                await notify_all_users(
+                    context,
+                    notification,
+                    exclude_user_id=user_id
+                )
+                
+                await query.edit_message_text(
+                    f"✅ Task added with {priority} priority!\n"
+                    f"All users have been notified."
+                )
             else:
                 await query.edit_message_text("⚠️ Failed to add task. Please try again.")
+            
+            # Clean up context
+            if 'task_description' in context.user_data:
+                del context.user_data['task_description']
+            if 'awaiting_priority' in context.user_data:
+                del context.user_data['awaiting_priority']
     
     elif data.startswith('delete_'):
         task_id = int(data.split('_')[1])
         task = task_db.get_task(task_id)
-        if task and task['user_id'] == user_id:
+        
+        if task:
             if task_db.delete_task(task_id):
                 await query.edit_message_text(f"🗑 Task deleted: {task['description']}")
+                
+                # Notify about deletion
+                notification = (
+                    f"🗑 Task deleted by {update.effective_user.full_name}:\n\n"
+                    f"*{task['description']}*"
+                )
+                await notify_all_users(context, notification, exclude_user_id=user_id)
             else:
                 await query.edit_message_text("⚠️ Failed to delete task. Please try again.")
         else:
-            await query.edit_message_text("⚠️ Invalid task selection!")
+            await query.edit_message_text("⚠️ Task not found!")
     
     elif data.startswith('edit_'):
         parts = data.split('_')
@@ -123,8 +171,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = parts[2]
         task = task_db.get_task(task_id)
         
-        if not task or task['user_id'] != user_id:
-            await query.edit_message_text("⚠️ Invalid task selection!")
+        if not task:
+            await query.edit_message_text("⚠️ Task not found!")
             return
         
         if action == 'select':
@@ -137,8 +185,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                f"What would you like to edit for task:\n{task['description']}?",
-                reply_markup=reply_markup
+                f"What would you like to edit for this task?\n\n"
+                f"Current: *{task['description']}* ({task['priority']} priority)",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
             )
         
         elif action == 'description':
@@ -148,9 +198,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif action == 'priority':
             keyboard = [
-                [InlineKeyboardButton("High", callback_data=f'edit_{task_id}_setpriority_High')],
-                [InlineKeyboardButton("Medium", callback_data=f'edit_{task_id}_setpriority_Medium')],
-                [InlineKeyboardButton("Low", callback_data=f'edit_{task_id}_setpriority_Low')]
+                [InlineKeyboardButton("High 🔴", callback_data=f'edit_{task_id}_setpriority_High')],
+                [InlineKeyboardButton("Medium 🟡", callback_data=f'edit_{task_id}_setpriority_Medium')],
+                [InlineKeyboardButton("Low 🟢", callback_data=f'edit_{task_id}_setpriority_Low')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
@@ -162,9 +212,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_priority = action.split('_')[1]
             if task_db.update_task_priority(task_id, new_priority):
                 await query.edit_message_text(f"✅ Priority updated to {new_priority}!")
+                
+                # Notify about the change
+                notification = (
+                    f"✏️ Task updated by {update.effective_user.full_name}:\n\n"
+                    f"*{task['description']}*\n"
+                    f"New priority: {new_priority}"
+                )
+                await notify_all_users(context, notification, exclude_user_id=user_id)
             else:
                 await query.edit_message_text("⚠️ Failed to update priority. Please try again.")
             
+            # Clean up context
             if 'editing_task' in context.user_data:
                 del context.user_data['editing_task']
             if 'editing_field' in context.user_data:
@@ -178,49 +237,49 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del context.user_data['editing_field']
 
 async def receive_edit_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
     if 'editing_task' in context.user_data and 'editing_field' in context.user_data:
         task_id = context.user_data['editing_task']
+        new_description = update.message.text
         task = task_db.get_task(task_id)
         
-        if task and task['user_id'] == user_id and context.user_data['editing_field'] == 'description':
-            new_description = update.message.text
+        if task and context.user_data['editing_field'] == 'description':
             if task_db.update_task_description(task_id, new_description):
                 await update.message.reply_text("✅ Task description updated!")
+                
+                # Notify about the change
+                notification = (
+                    f"✏️ Task updated by {update.effective_user.full_name}:\n\n"
+                    f"Old: {task['description']}\n"
+                    f"New: *{new_description}*"
+                )
+                await notify_all_users(context, notification, exclude_user_id=str(update.effective_user.id))
             else:
                 await update.message.reply_text("⚠️ Failed to update description. Please try again.")
             
+            # Clean up context
             del context.user_data['editing_task']
             del context.user_data['editing_field']
 
 async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    tasks = task_db.get_tasks(user_id)
+    tasks = task_db.get_all_tasks()
     
     if not tasks:
-        await update.message.reply_text("You don't have any tasks yet!")
+        await update.message.reply_text("No tasks yet! Use /add to create the first one.")
         return
     
-    message = "📋 *Your Tasks* 📋\n\n"
+    message = "📋 *Shared Task List* 📋\n\n"
     for task in tasks:
-        priority_icon = ''
-        if task['priority'] == 'High':
-            priority_icon = '🔴'
-        elif task['priority'] == 'Medium':
-            priority_icon = '🟡'
-        else:
-            priority_icon = '🟢'
-        
-        message += f"{task['id']}. {priority_icon} {task['description']} ({task['priority']} priority)\n"
+        priority_icon = '🔴' if task['priority'] == 'High' else '🟡' if task['priority'] == 'Medium' else '🟢'
+        creator = f" (by {task['created_by']})" if task['created_by'] else ""
+        message += f"{task['id']}. {priority_icon} *{task['description']}*{creator}\n"
     
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def edit_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    tasks = task_db.get_tasks(user_id)
+    tasks = task_db.get_all_tasks()
     
     if not tasks:
-        await update.message.reply_text("You don't have any tasks to edit!")
+        await update.message.reply_text("No tasks to edit yet! Use /add to create one.")
         return
     
     keyboard = []
@@ -239,11 +298,10 @@ async def edit_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    tasks = task_db.get_tasks(user_id)
+    tasks = task_db.get_all_tasks()
     
     if not tasks:
-        await update.message.reply_text("You don't have any tasks to delete!")
+        await update.message.reply_text("No tasks to delete yet! Use /add to create one.")
         return
     
     keyboard = []
