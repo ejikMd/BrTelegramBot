@@ -1,0 +1,315 @@
+C# Mock Implementation for MIP SDK Testing
+Here's a complete C# solution for mocking MIP SDK endpoints using HttpClient and Moq for unit testing:
+
+1. Mock HTTP Handlers for MIP Services
+csharp
+using System;
+using System.Net;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+
+public class MockMipHttpHandler : DelegatingHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        // Mock Azure AD Token Endpoint
+        if (request.RequestUri.AbsolutePath.EndsWith("/oauth2/v2.0/token"))
+        {
+            var tokenResponse = new
+            {
+                token_type = "Bearer",
+                expires_in = 3600,
+                access_token = "mock-access-token",
+                refresh_token = "mock-refresh-token"
+            };
+            return CreateJsonResponse(tokenResponse);
+        }
+
+        // Mock Labels Endpoint
+        if (request.RequestUri.AbsolutePath.EndsWith("/sensitivityLabels"))
+        {
+            var labels = new
+            {
+                value = new[]
+                {
+                    new { id = "1", name = "Confidential", tooltip = "Mock Confidential Label" },
+                    new { id = "2", name = "Internal", tooltip = "Mock Internal Label" }
+                }
+            };
+            return CreateJsonResponse(labels);
+        }
+
+        // Mock Label Policies Endpoint
+        if (request.RequestUri.AbsolutePath.Contains("/labelPolicies"))
+        {
+            var policies = new
+            {
+                labels = new[]
+                {
+                    new { id = "1", name = "Confidential", isEnabled = true },
+                    new { id = "2", name = "Internal", isEnabled = true }
+                }
+            };
+            return CreateJsonResponse(policies);
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("Mock endpoint not implemented")
+        };
+    }
+
+    private HttpResponseMessage CreateJsonResponse(object data)
+    {
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                JsonConvert.SerializeObject(data),
+                System.Text.Encoding.UTF8,
+                "application/json")
+        };
+    }
+}
+2. Mock MIP SDK Interfaces with Moq
+csharp
+using Microsoft.InformationProtection;
+using Microsoft.InformationProtection.Policy;
+using Moq;
+using System.Collections.Generic;
+
+public class MipMocks
+{
+    public static Mock<IAuthDelegate> CreateAuthDelegateMock()
+    {
+        var mock = new Mock<IAuthDelegate>();
+        mock.Setup(x => x.AcquireToken(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .ReturnsAsync("mock-access-token");
+        
+        return mock;
+    }
+
+    public static Mock<IPolicyProfile> CreatePolicyProfileMock()
+    {
+        var mock = new Mock<IPolicyProfile>();
+        var engineMock = new Mock<IPolicyEngine>();
+        
+        // Setup mock labels
+        var labels = new List<Label>
+        {
+            new MockLabel("1", "Confidential"),
+            new MockLabel("2", "Internal")
+        };
+
+        engineMock.Setup(x => x.ListSensitivityLabels())
+                 .Returns(labels);
+        
+        mock.Setup(x => x.AddEngineAsync(
+                It.IsAny<PolicyEngineSettings>()))
+            .ReturnsAsync(engineMock.Object);
+        
+        return mock;
+    }
+
+    private class MockLabel : Label
+    {
+        public MockLabel(string id, string name)
+        {
+            Id = id;
+            Name = name;
+        }
+
+        public string Id { get; }
+        public string Name { get; }
+        public string Description => $"Mock {Name} Label";
+        public string Color => "#000000";
+        public int Sensitivity => Name == "Confidential" ? 3 : 1;
+        public string Tooltip => $"Mock tooltip for {Name}";
+    }
+}
+3. Testable MIP Client Implementation
+csharp
+using Microsoft.InformationProtection;
+using Microsoft.InformationProtection.Policy;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+public class MipClient
+{
+    private readonly IAuthDelegate _authDelegate;
+    private readonly IHttpClientFactory _httpClientFactory;
+    
+    public MipClient(IAuthDelegate authDelegate, IHttpClientFactory httpClientFactory)
+    {
+        _authDelegate = authDelegate;
+        _httpClientFactory = httpClientFactory;
+    }
+
+    public async Task<List<Label>> GetLabelsAsync()
+    {
+        // In real implementation, this would call MIP SDK
+        // For mock purposes, we'll simulate the behavior
+        
+        var profileSettings = new PolicyProfileSettings(
+            "mip_profile",
+            _authDelegate,
+            null,
+            "en-US");
+        
+        // Normally you'd use MIP SDK here, but we'll mock it
+        var profile = MipMocks.CreatePolicyProfileMock().Object;
+        var engine = await profile.AddEngineAsync(
+            new PolicyEngineSettings(
+                "mock@contoso.com",
+                "")
+            {
+                Identity = new Identity("mock@contoso.com")
+            });
+        
+        return engine.ListSensitivityLabels();
+    }
+}
+4. Unit Tests with Mock Dependencies
+csharp
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Moq;
+using System.Linq;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+[TestClass]
+public class MipClientTests
+{
+    [TestMethod]
+    public async Task GetLabels_ReturnsMockLabels()
+    {
+        // Arrange
+        var authMock = MipMocks.CreateAuthDelegateMock();
+        var httpClientFactoryMock = new Mock<IHttpClientFactory>();
+        
+        // Setup mock HTTP client
+        var handler = new MockMipHttpHandler();
+        var httpClient = new HttpClient(handler);
+        httpClientFactoryMock.Setup(x => x.CreateClient(It.IsAny<string>()))
+                            .Returns(httpClient);
+        
+        var client = new MipClient(authMock.Object, httpClientFactoryMock.Object);
+        
+        // Act
+        var labels = await client.GetLabelsAsync();
+        
+        // Assert
+        Assert.IsTrue(labels.Any(l => l.Name == "Confidential"));
+        Assert.IsTrue(labels.Any(l => l.Name == "Internal"));
+    }
+}
+5. Integration Test Setup with Test Server
+csharp
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Hosting;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+public class MipIntegrationTests
+{
+    private HttpClient _testClient;
+    
+    [TestInitialize]
+    public async Task Initialize()
+    {
+        var hostBuilder = new HostBuilder()
+            .ConfigureWebHost(webHost =>
+            {
+                webHost.UseTestServer();
+                webHost.UseStartup<TestStartup>();
+            });
+        
+        var host = await hostBuilder.StartAsync();
+        _testClient = host.GetTestClient();
+    }
+
+    [TestMethod]
+    public async Task TestMockTokenEndpoint()
+    {
+        var response = await _testClient.PostAsync("/oauth2/v2.0/token", null);
+        response.EnsureSuccessStatusCode();
+        
+        var content = await response.Content.ReadAsStringAsync();
+        Assert.IsTrue(content.Contains("mock-access-token"));
+    }
+}
+
+public class TestStartup
+{
+    public void ConfigureServices(IServiceCollection services)
+    {
+        services.AddControllers();
+    }
+    
+    public void Configure(IApplicationBuilder app)
+    {
+        app.UseRouting();
+        app.UseEndpoints(endpoints =>
+        {
+            endpoints.MapPost("/oauth2/v2.0/token", async context =>
+            {
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    token_type = "Bearer",
+                    expires_in = 3600,
+                    access_token = "mock-access-token"
+                });
+            });
+        });
+    }
+}
+6. Mocking Protection Handlers
+csharp
+using Microsoft.InformationProtection.Protection;
+using Moq;
+
+public static class ProtectionMocks
+{
+    public static Mock<IProtectionHandler> CreateProtectionHandlerMock()
+    {
+        var mock = new Mock<IProtectionHandler>();
+        
+        mock.Setup(x => x.GetSerializedProtectedStream(It.IsAny<Stream>()))
+            .Returns<Stream>(input =>
+            {
+                // Return mock protected stream
+                var mockStream = new MemoryStream();
+                var writer = new StreamWriter(mockStream);
+                writer.Write("MOCK_PROTECTED_CONTENT");
+                writer.Flush();
+                mockStream.Position = 0;
+                return Task.FromResult((Stream)mockStream);
+            });
+            
+        mock.Setup(x => x.GetSerializedProtectionDescriptor())
+            .Returns("Mock protection descriptor");
+            
+        return mock;
+    }
+}
+This implementation provides:
+
+Complete HTTP endpoint mocking for MIP services
+
+Mock implementations of key MIP SDK interfaces
+
+Unit test examples
+
+Integration test setup
+
+Protection handler mocking
+
+You can extend these mocks to cover additional MIP SDK functionality as needed for your testing scenarios.
